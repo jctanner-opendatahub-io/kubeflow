@@ -41,6 +41,7 @@ import (
 const (
 	OAuthServicePort     = 443
 	OAuthServicePortName = "oauth-proxy"
+	DebugProxyPortName   = "debug-proxy"
 	// OAuthProxyImage uses sha256 manifest list digest value of v4.14 image for AMD64 as default to be compatible with imagePullPolicy: IfNotPresent, overridable
 	// taken from https://catalog.redhat.com/software/containers/openshift4/ose-oauth-proxy/5cdb2133bed8bd5717d5ae64?image=66cefc14401df6ff4664ec43&architecture=amd64&container-tabs=overview
 	// and kept in sync with the manifests here and in ClusterServiceVersion metadata of opendatahub operator
@@ -65,20 +66,23 @@ type OAuthClientConfig struct {
 
 // NewNotebookServiceAccount defines the desired service account object
 func NewNotebookServiceAccount(notebook *nbv1.Notebook) *corev1.ServiceAccount {
-	return &corev1.ServiceAccount{
+	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      notebook.Name,
 			Namespace: notebook.Namespace,
 			Labels: map[string]string{
 				"notebook-name": notebook.Name,
 			},
-			Annotations: map[string]string{
-				"serviceaccounts.openshift.io/oauth-redirectreference.first": "" +
-					`{"kind":"OAuthRedirectReference","apiVersion":"v1",` +
-					`"reference":{"kind":"Route","name":"` + notebook.Name + `"}}`,
-			},
 		},
 	}
+	if GetNetworkMode() != "gateway-api" {
+		sa.Annotations = map[string]string{
+			"serviceaccounts.openshift.io/oauth-redirectreference.first": "" +
+				`{"kind":"OAuthRedirectReference","apiVersion":"v1",` +
+				`"reference":{"kind":"Route","name":"` + notebook.Name + `"}}`,
+		}
+	}
+	return sa
 }
 
 // CompareNotebookServiceAccounts checks if two service accounts are equal, if
@@ -132,6 +136,29 @@ func (r *OpenshiftNotebookReconciler) ReconcileOAuthServiceAccount(notebook *nbv
 
 // NewNotebookOAuthService defines the desired OAuth service object
 func NewNotebookOAuthService(notebook *nbv1.Notebook) *corev1.Service {
+	if GetNetworkMode() == "gateway-api" {
+		// Return a debug proxy service instead of the oauth proxy
+		return &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      notebook.Name + "-tls",
+				Namespace: notebook.Namespace,
+				Labels: map[string]string{
+					"notebook-name": notebook.Name,
+				},
+			},
+			Spec: corev1.ServiceSpec{
+				Ports: []corev1.ServicePort{{
+					Name:       DebugProxyPortName,
+					Port:       OAuthServicePort,
+					TargetPort: intstr.FromString(DebugProxyPortName),
+					Protocol:   corev1.ProtocolTCP,
+				}},
+				Selector: map[string]string{
+					"statefulset": notebook.Name,
+				},
+			},
+		}
+	}
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      notebook.Name + "-tls",

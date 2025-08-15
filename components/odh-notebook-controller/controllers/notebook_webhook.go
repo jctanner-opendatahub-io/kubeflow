@@ -100,6 +100,33 @@ func InjectReconciliationLock(meta *metav1.ObjectMeta) error {
 // InjectOAuthProxy injects the OAuth proxy sidecar container in the Notebook
 // spec
 func InjectOAuthProxy(notebook *nbv1.Notebook, oauth OAuthConfig) error {
+	if GetNetworkMode() == "gateway-api" {
+		// Inject a debug proxy instead of the oauth proxy
+		proxyContainer := corev1.Container{
+			Name:            "debug-proxy",
+			Image:           "registry.tannerjc.net/debug-proxy:latest",
+			ImagePullPolicy: corev1.PullAlways,
+			Ports: []corev1.ContainerPort{{
+				Name:          DebugProxyPortName,
+				ContainerPort: 8888,
+				Protocol:      corev1.ProtocolTCP,
+			}},
+		}
+		// Add the sidecar container to the notebook
+		notebookContainers := &notebook.Spec.Template.Spec.Containers
+		proxyContainerExists := false
+		for index, container := range *notebookContainers {
+			if container.Name == "debug-proxy" {
+				(*notebookContainers)[index] = proxyContainer
+				proxyContainerExists = true
+				break
+			}
+		}
+		if !proxyContainerExists {
+			*notebookContainers = append(*notebookContainers, proxyContainer)
+		}
+		return nil
+	}
 	// https://pkg.go.dev/k8s.io/api/core/v1#Container
 	proxyContainer := corev1.Container{
 		Name:            "oauth-proxy",

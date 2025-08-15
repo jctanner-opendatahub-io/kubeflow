@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
@@ -77,6 +78,7 @@ type OpenshiftNotebookReconciler struct {
 // +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks/status,verbs=get
 // +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts;secrets;configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=config.openshift.io,resources=proxies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch
@@ -92,6 +94,11 @@ func CompareNotebooks(nb1 nbv1.Notebook, nb2 nbv1.Notebook) bool {
 	return reflect.DeepEqual(nb1.ObjectMeta.Labels, nb2.ObjectMeta.Labels) &&
 		reflect.DeepEqual(nb1.ObjectMeta.Annotations, nb2.ObjectMeta.Annotations) &&
 		reflect.DeepEqual(nb1.Spec, nb2.Spec)
+}
+
+// GetNetworkMode returns the network mode from the environment variable.
+func GetNetworkMode() string {
+	return os.Getenv("NETWORK_MODE")
 }
 
 // OAuthInjectionIsEnabled returns true if the oauth sidecar injection
@@ -227,43 +234,51 @@ func (r *OpenshiftNotebookReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	if !ServiceMeshIsEnabled(notebook.ObjectMeta) {
-		// Create the objects required by the OAuth proxy sidecar (see notebook_oauth.go file)
-		if OAuthInjectionIsEnabled(notebook.ObjectMeta) {
+	if GetNetworkMode() == "gateway-api" {
+		err = r.ReconcileHttpRoute(notebook, ctx)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
 
-			err = r.ReconcileOAuthServiceAccount(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+		if !ServiceMeshIsEnabled(notebook.ObjectMeta) {
+			// Create the objects required by the OAuth proxy sidecar (see notebook_oauth.go file)
+			if OAuthInjectionIsEnabled(notebook.ObjectMeta) {
 
-			// Call the OAuth Service reconciler
-			err = r.ReconcileOAuthService(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+				err = r.ReconcileOAuthServiceAccount(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
 
-			// Call the OAuth Secret reconciler
-			err = r.ReconcileOAuthSecret(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+				// Call the OAuth Service reconciler
+				err = r.ReconcileOAuthService(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
 
-			// Call the OAuth Route reconciler
-			err = r.ReconcileOAuthRoute(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
+				// Call the OAuth Secret reconciler
+				err = r.ReconcileOAuthSecret(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
 
-			// Call the OAuthClient reconciler
-			err = r.ReconcileOAuthClient(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-		} else {
-			// Call the route reconciler (see notebook_route.go file)
-			err = r.ReconcileRoute(notebook, ctx)
-			if err != nil {
-				return ctrl.Result{}, err
+				// Call the OAuth Route reconciler
+				err = r.ReconcileOAuthRoute(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+
+				// Call the OAuthClient reconciler
+				err = r.ReconcileOAuthClient(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+			} else {
+				// Call the route reconciler (see notebook_route.go file)
+				err = r.ReconcileRoute(notebook, ctx)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
 			}
 		}
 	}
@@ -278,6 +293,89 @@ func (r *OpenshiftNotebookReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// ReconcileHttpRoute will manage the creation, update and deletion of the HttpRoute
+// when the notebook is reconciled.
+func (r *OpenshiftNotebookReconciler) ReconcileHttpRoute(notebook *nbv1.Notebook, ctx context.Context) error {
+	// Initialize logger format
+	log := r.Log.WithValues("notebook", notebook.Name, "namespace", notebook.Namespace)
+
+	// Create the HttpRoute if it does not already exist
+	foundHttpRoute := &gatewayv1.HTTPRoute{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      notebook.Name,
+		Namespace: notebook.Namespace,
+	}, foundHttpRoute)
+	if err != nil {
+		if apierrs.IsNotFound(err) {
+			log.Info("Creating HttpRoute")
+
+			// Get the service for the notebook
+			service := &corev1.Service{}
+			err = r.Get(ctx, types.NamespacedName{
+				Name:      notebook.Name,
+				Namespace: notebook.Namespace,
+			}, service)
+			if err != nil {
+				return err
+			}
+
+			// Create the HttpRoute
+			httpRoute := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      notebook.Name,
+					Namespace: notebook.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(notebook, notebook.GroupVersionKind()),
+					},
+				},
+				Spec: gatewayv1.HTTPRouteSpec{
+					CommonRouteSpec: gatewayv1.CommonRouteSpec{
+						ParentRefs: []gatewayv1.ParentReference{
+							{
+								Name:      "odh-gateway",
+								Namespace: gatewayv1.Namespace("openshift-ingress"),
+							},
+						},
+					},
+					Hostnames: []gatewayv1.Hostname{
+						"gateway.apps-crc.testing",
+					},
+					Rules: []gatewayv1.HTTPRouteRule{
+						{
+							Matches: []gatewayv1.HTTPRouteMatch{
+								{
+									Path: &gatewayv1.HTTPPathMatch{
+										Type:  (*gatewayv1.PathMatchType)(gatewayv1.PathMatchPathPrefix),
+										Value: &[]string{"/notebook/" + notebook.Namespace + "/" + notebook.Name}[0],
+									},
+								},
+							},
+							BackendRefs: []gatewayv1.HTTPBackendRef{
+								{
+									BackendRef: gatewayv1.BackendRef{
+										BackendObjectReference: gatewayv1.BackendObjectReference{
+											Name: gatewayv1.ObjectName(notebook.Name),
+											Port: &[]gatewayv1.PortNumber{8888}[0],
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			err = r.Create(ctx, httpRoute)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // createNotebookCertConfigMap creates a ConfigMap workbench-trusted-ca-bundle
