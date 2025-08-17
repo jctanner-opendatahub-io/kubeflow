@@ -322,6 +322,10 @@ func (r *OpenshiftNotebookReconciler) ReconcileHttpRoute(notebook *nbv1.Notebook
 			}
 
 			// Create the HttpRoute
+			namespace := gatewayv1.Namespace("openshift-ingress")
+			pathPrefix := gatewayv1.PathMatchPathPrefix
+			pathValue := "/notebook/" + notebook.Namespace + "/" + notebook.Name
+			portNumber := gatewayv1.PortNumber(8888)
 			httpRoute := &gatewayv1.HTTPRoute{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      notebook.Name,
@@ -335,7 +339,7 @@ func (r *OpenshiftNotebookReconciler) ReconcileHttpRoute(notebook *nbv1.Notebook
 						ParentRefs: []gatewayv1.ParentReference{
 							{
 								Name:      "odh-gateway",
-								Namespace: gatewayv1.Namespace("openshift-ingress"),
+								Namespace: &namespace,
 							},
 						},
 					},
@@ -347,8 +351,8 @@ func (r *OpenshiftNotebookReconciler) ReconcileHttpRoute(notebook *nbv1.Notebook
 							Matches: []gatewayv1.HTTPRouteMatch{
 								{
 									Path: &gatewayv1.HTTPPathMatch{
-										Type:  (*gatewayv1.PathMatchType)(gatewayv1.PathMatchPathPrefix),
-										Value: &[]string{"/notebook/" + notebook.Namespace + "/" + notebook.Name}[0],
+										Type:  &pathPrefix,
+										Value: &pathValue,
 									},
 								},
 							},
@@ -357,7 +361,7 @@ func (r *OpenshiftNotebookReconciler) ReconcileHttpRoute(notebook *nbv1.Notebook
 									BackendRef: gatewayv1.BackendRef{
 										BackendObjectReference: gatewayv1.BackendObjectReference{
 											Name: gatewayv1.ObjectName(notebook.Name),
-											Port: &[]gatewayv1.PortNumber{8888}[0],
+											Port: &portNumber,
 										},
 									},
 								},

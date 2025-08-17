@@ -151,19 +151,16 @@ func main() {
 
 	// Setup notebook mutating webhook
 	hookServer := mgr.GetWebhookServer()
-	notebookWebhook := &webhook.Admission{
-		Handler: &controllers.NotebookWebhook{
-			Log:       ctrl.Log.WithName("controllers").WithName("odh-notebook-webhook"),
-			Client:    mgr.GetClient(),
-			Config:    mgr.GetConfig(),
-			Namespace: namespace,
-			OAuthConfig: controllers.OAuthConfig{
-				ProxyImage: oauthProxyImage,
-			},
-			Decoder: admission.NewDecoder(mgr.GetScheme()),
+	notebookWebhook := &controllers.NotebookWebhook{
+		Log:       ctrl.Log.WithName("controllers").WithName("odh-notebook-webhook"),
+		Client:    mgr.GetClient(),
+		Config:    mgr.GetConfig(),
+		Namespace: namespace,
+		OAuthConfig: controllers.OAuthConfig{
+			ProxyImage: oauthProxyImage,
 		},
 	}
-	hookServer.Register("/mutate-notebook-v1", notebookWebhook)
+	hookServer.Register("/mutate-notebook-v1", &admission.Webhook{Handler: notebookWebhook})
 
 	//+kubebuilder:scaffold:builder
 
